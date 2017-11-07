@@ -1,0 +1,753 @@
+---
+title: "CERF data workup"
+author: "Kim Cressman"
+date: "`r Sys.Date()`"
+output: 
+    html_document:
+        code_folding: 'hide'
+        fig_width: 8
+        fig_height: 6
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+```
+
+Load packages
+
+```{r}
+library(tidyverse)
+library(reshape2)
+library(lubridate)
+library(htmlTable)
+library(shape)
+library(RColorBrewer)
+library(knitr)
+```
+
+
+### Data Download
+
+__NERRS data__: I used the "Custom Query" option from the CDMO's Advanced Query System (http://cdmo.baruch.sc.edu/aqs/) to download WQ and MET data from all stations at all 5 Gulf of Mexico Reserves, from 5/1/2017 - 10/30/2017. This was delivered in one CSV file, which I named "nerrs.csv".
+
+__IOOS data__: I used the GCOOS data portal to find stations that had water level and/or salinity data in gaps between NERRS. I ended up downloading data from two NOAA Tides and Currents stations; one in Texas, near Houston (NOS 8770613), and one in Louisiana (NOS 8764314). It was surprisingly difficult to find the data; there was no direct link that I could find from the GCOOS portal. I did get enough information to google the stations and find them. Data through Tides and Currents can only be downloaded a month at a time, and there are three separate data types to deal with, so I figured out the url pattern for each type (MET, water level, and temp/conductivity), copied and pasted, changed the dates, changed the stations, and downloaded everything in one run of the script `Data downloads`. I then used the script `Data concatination` to glue all of those NOS files together, and exported a CSV that I named "NOS_all.csv".
+
+
+### Load data
+
+Also, combine NOS files with NERRS files.
+
+Okay, there are 40 variables in my NERRS files, so I'm going to reduce that by removing rejected data and data outside sensor limits (QC codes -3, -4, and -5), then getting rid of the QC columns.
+
+```{r, cache=TRUE}
+nerrs_init <- read.csv("nerrs.csv", stringsAsFactors = FALSE)
+####
+names(nerrs_init) <- tolower(names(nerrs_init))
+
+# remove rejected nerrs data
+nerrs_init$temp[grepl("-3|-4|-5", nerrs_init$f_temp) == TRUE] <- NA
+nerrs_init$spcond[grepl("-3|-4|-5", nerrs_init$f_spcond) == TRUE] <- NA
+nerrs_init$sal[grepl("-3|-4|-5", nerrs_init$f_sal) == TRUE] <- NA
+nerrs_init$depth[grepl("-3|-4|-5", nerrs_init$f_depth) == TRUE] <- NA
+nerrs_init$level[grepl("-3|-4|-5", nerrs_init$f_level) == TRUE] <- NA
+nerrs_init$bp[grepl("-3|-4|-5", nerrs_init$f_bp) == TRUE] <- NA
+nerrs_init$rh[grepl("-3|-4|-5", nerrs_init$f_rh) == TRUE] <- NA
+nerrs_init$wspd[grepl("-3|-4|-5", nerrs_init$f_wspd) == TRUE] <- NA
+nerrs_init$maxwspd[grepl("-3|-4|-5", nerrs_init$f_maxwspd) == TRUE] <- NA
+nerrs_init$wdir[grepl("-3|-4|-5", nerrs_init$f_wdir) == TRUE] <- NA
+nerrs_init$atemp[grepl("-3|-4|-5", nerrs_init$f_atemp) == TRUE] <- NA
+```
+
+
+
+```{r}
+nerrs <- nerrs_init %>%
+    mutate(datetimestamp = mdy_hm(datetimestamp),
+           wdir = as.numeric(wdir),
+           rh = as.numeric(rh),
+           bp = as.numeric(bp)) %>%
+    select(datetimestamp,
+           stationcode,
+           atemp,
+           rh,
+           bp,
+           wspd,
+           maxwspd,
+           wdir,
+           totprcp,
+           spcond,
+           sal,
+           depth,
+           level,
+           turb) 
+
+nos <- read.csv("NOS_all.csv") %>%
+    mutate(datetimestamp = ymd_hms(datetimestamp))
+
+dat <- bind_rows(nerrs, nos) %>%
+    mutate(site = substr(stationcode, 1, 3),
+           stationcode = sub("\\s+$", "", stationcode)) %>%
+    group_by(stationcode)
+```
+
+
+## split up into WQ and MET
+
+```{r}
+wq <- c("apadbwq", "apapcwq", "gndbcwq", "gndblwq", "la_nos", "rkbfuwq", "rkbmbwq", "tx_nos", "wkbfrwq", "wkbwbwq", "marmbwq")
+met <- c("apaebmet", "gndcrmet", "la_nos", "rkbuhmet", "tx_nos", "wkbshmet", "marcemet", "marscmet")
+
+dat_wq <- dat %>%
+    filter(stationcode %in% wq) %>%
+    select(datetimestamp, stationcode, sal, depth, level, temp, spcond)
+
+dat_met <- dat %>%
+    filter(stationcode %in% met) %>%
+    select(datetimestamp, stationcode, atemp, rh, bp, wspd, maxwspd, wdir, totprcp)
+
+## rkb's wind sensor is screwy; replace those values with NAs
+dat_met$wspd[dat_met$stationcode == "rkbuhmet"] <- NA
+dat_met$maxwspd[dat_met$stationcode == "rkbuhmet"] <- NA
+```
+
+
+## Some initial graphs to see what's interesting across the gulf
+
+__Baro Pressure__ - always a good storm indicator
+
+Ohhhhh noooooo, everything is in LST; need to put it all into EST or something so time scale is the same.
+
+
+Landfall dates: These will be vertical lines on the graphs.   
+
+*  6-22 - TS Cindy
+*  7-31 - TS Emily
+*  8-26 - MH Harvey
+*  9-10 - MH Irma
+*  10-8 - H Nate
+
+```{r}
+Cindy <- as.numeric(as.POSIXct("2017-06-22 12:00"))
+Emily <- as.numeric(as.POSIXct("2017-07-31 12:00"))
+Harvey <- as.numeric(as.POSIXct("2017-08-26 12:00"))
+Irma <- as.numeric(as.POSIXct("2017-09-10 12:00"))
+Nate <- as.numeric(as.POSIXct("2017-10-08 12:00"))
+```
+
+
+```{r, fig.width=9, fig.height=4}
+
+ggplot(dat_met, aes(x=datetimestamp, y=bp)) +
+    geom_line(aes(col=stationcode), lwd=0.7, alpha=0.8) +
+    geom_vline(aes(xintercept=Cindy), lty=4, lwd=0.5) +
+    geom_vline(aes(xintercept=Emily), lty=4, lwd=0.5) +
+    geom_vline(aes(xintercept=Harvey), lty=4, lwd=0.5) +
+    geom_vline(aes(xintercept=Irma), lty=4, lwd=0.5) +
+    geom_vline(aes(xintercept=Nate), lty=4, lwd=0.5) +
+    coord_cartesian(ylim=c(930, 1030)) +
+    ggtitle("barometric pressure, mb") +
+    theme_bw()
+
+ggplot(dat_met, aes(x=datetimestamp, y=bp)) +
+    geom_line(aes(col=stationcode), lwd=0.7, alpha=0.8) +
+    coord_cartesian(ylim=c(930, 1030)) +
+    ggtitle("barometric pressure, mb") +
+    xlab("date") +
+    ylab("pressure") +
+    theme_bw()
+
+ggplot(dat_met, aes(x=datetimestamp, y=bp)) +
+    geom_line(aes(col=stationcode), lwd=0.7, alpha=0.8) +
+    coord_cartesian(ylim=c(990, 1030)) +
+    ggtitle("barometric pressure, mb") +
+    xlab("date") +
+    ylab("pressure") +
+    theme_bw()
+
+ggplot(dat_met, aes(x=datetimestamp, y=bp)) +
+    geom_line(aes(col=stationcode), lwd=0.7, alpha=0.8) +
+    geom_vline(aes(xintercept=Cindy), lty=4, lwd=0.5) +
+    geom_vline(aes(xintercept=Emily), lty=4, lwd=0.5) +
+    geom_vline(aes(xintercept=Harvey), lty=4, lwd=0.5) +
+    geom_vline(aes(xintercept=Irma), lty=4, lwd=0.5) +
+    geom_vline(aes(xintercept=Nate), lty=4, lwd=0.5) +
+    coord_cartesian(ylim=c(990, 1030)) +
+    ggtitle("barometric pressure, mb") +
+    theme_bw()
+
+# ggplot(dat_met, aes(x=datetimestamp, y=bp, col=stationcode)) +
+#     geom_smooth(method="loess", se=FALSE, span=0.05, lwd=0.5, alpha=0.6) +
+#     coord_cartesian(ylim=c(930, 1030)) +
+#     theme_bw()
+# 
+# ggplot(dat_met, aes(x=datetimestamp, y=bp, col=stationcode)) +
+#     geom_smooth(method="loess", se=FALSE, span=0.01, lwd=0.5, alpha=0.6) +
+#     coord_cartesian(ylim=c(930, 1030)) +
+#     theme_bw()
+# 
+# ggplot(dat_met, aes(x=datetimestamp, y=bp, col=stationcode)) +
+#     geom_smooth(method="loess", se=FALSE, span=0.05) +
+#     theme_bw()
+```
+
+
+__wind speed__
+
+
+```{r, fig.width=9, fig.height=4}
+dat_met2 <- filter(dat_met, stationcode != "rkbuhmet")
+ggplot(dat_met2, aes(x=datetimestamp, y=wspd)) +
+    geom_line(aes(col=stationcode), lwd=0.7, alpha=0.75) +
+    geom_vline(aes(xintercept=Cindy), lty=4, lwd=0.5, alpha=0.5) +
+    geom_vline(aes(xintercept=Emily), lty=4, lwd=0.5, alpha=0.5) +
+    geom_vline(aes(xintercept=Harvey), lty=4, lwd=0.5, alpha=0.5) +
+    geom_vline(aes(xintercept=Irma), lty=4, lwd=0.5, alpha=0.5) +
+    geom_vline(aes(xintercept=Nate), lty=4, lwd=0.5, alpha=0.5) +
+    ggtitle("wind speed, m/s") +
+    theme_bw()
+
+ggplot(dat_met2, aes(x=datetimestamp, y=maxwspd)) +
+    geom_line(aes(col=stationcode), lwd=0.7, alpha=0.75) +
+    geom_vline(aes(xintercept=Cindy), lty=4, lwd=0.5, alpha=0.5) +
+    geom_vline(aes(xintercept=Emily), lty=4, lwd=0.5, alpha=0.5) +
+    geom_vline(aes(xintercept=Harvey), lty=4, lwd=0.5, alpha=0.5) +
+    geom_vline(aes(xintercept=Irma), lty=4, lwd=0.5, alpha=0.5) +
+    geom_vline(aes(xintercept=Nate), lty=4, lwd=0.5, alpha=0.5) +
+    ggtitle("max wind speed, m/s") +
+    theme_bw()
+```
+
+__depth/level__
+
+
+```{r, fig.width=9, fig.height=18}
+ggplot(dat_wq, aes(x=datetimestamp, y=depth)) +
+    geom_line(aes(col=stationcode), lwd=0.5) +
+    geom_vline(aes(xintercept=Cindy), lty=4, lwd=0.5, alpha=0.5) +
+    geom_vline(aes(xintercept=Emily), lty=4, lwd=0.5, alpha=0.5) +
+    geom_vline(aes(xintercept=Harvey), lty=4, lwd=0.5, alpha=0.5) +
+    geom_vline(aes(xintercept=Irma), lty=4, lwd=0.5, alpha=0.5) +
+    geom_vline(aes(xintercept=Nate), lty=4, lwd=0.5, alpha=0.5) +
+    facet_wrap(~stationcode, ncol=1) +
+    theme_bw()
+
+ggplot(dat_wq, aes(x=datetimestamp, y=level)) +
+    geom_line(aes(col=stationcode), lwd=0.5) +
+    geom_vline(aes(xintercept=Cindy), lty=4, lwd=0.5, alpha=0.5) +
+    geom_vline(aes(xintercept=Emily), lty=4, lwd=0.5, alpha=0.5) +
+    geom_vline(aes(xintercept=Harvey), lty=4, lwd=0.5, alpha=0.5) +
+    geom_vline(aes(xintercept=Irma), lty=4, lwd=0.5, alpha=0.5) +
+    geom_vline(aes(xintercept=Nate), lty=4, lwd=0.5, alpha=0.5) +
+    facet_wrap(~stationcode, ncol=1) +
+    theme_bw()
+```
+
+
+__spc/conductivity__
+
+```{r, fig.width=9, fig.height=18}
+ggplot(dat_wq, aes(x=datetimestamp, y=spcond)) +
+    geom_line(aes(col=stationcode), lwd=0.5) +
+    geom_vline(aes(xintercept=Cindy), lty=4, lwd=0.5, alpha=0.5) +
+    geom_vline(aes(xintercept=Emily), lty=4, lwd=0.5) +
+    geom_vline(aes(xintercept=Harvey), lty=4, lwd=0.5, alpha=0.5) +
+    geom_vline(aes(xintercept=Irma), lty=4, lwd=0.5, alpha=0.5) +
+    geom_vline(aes(xintercept=Nate), lty=4, lwd=0.5, alpha=0.5) +
+    facet_wrap(~stationcode, ncol=1) +
+    theme_bw()
+```
+
+
+### Data summaries
+
+
+Part of this project is meant to summarize data. I'll be pulling code from Kari St. Laurent and Shannon Dunnigan below. I'll use dates from the National Hurricane Center to define storm periods; for baseline I'll go 2 weeks before the start date; and for post-storm period I'll go two weeks after the end date. I originally used 30 days after storm end date, but then I had post-storm periods that were affected by the next hurricane. So these may not be the best but they're a starting point and can be tinkered with later.  
+
+I'm going to want to pull out min, max, mean, and median of various paramaters at each station - both from the 15-minute (or hourly) data, and from daily averages. So I'm probably going to need to make a function or two to streamline this.
+
+
+First, I've made a data frame of the storms and their start and end dates:
+
+```{r}
+# make a data frame of the storms to look at
+
+storm_info <- data.frame(storm_name = c("Cindy", "Emily", "Harvey", "Irma", "Nate"), 
+                         storm_start = c("2017-06-20", "2017-07-31", "2017-08-17", "2017-08-30", "2017-10-04"), 
+                         storm_end = c("2017-06-23", "2017-08-01", "2017-08-31", "2017-09-12", "2017-10-09"))
+
+storm_info <- storm_info %>%
+    mutate(storm_start = ymd(storm_start),
+           storm_end = ymd(storm_end),
+           baseline_start = storm_start - days(14),
+           post_end = storm_end + days(14)) %>%
+    select(storm_name, baseline_start, storm_start, storm_end, post_end)
+
+kable(storm_info)
+```
+
+Would be nice to include some of the other parameters that Shannon looked up, like max wind speed, min baro pressure, amount of damages, etc. That's lower priority at this moment though.
+
+Because of the potential for date overlap between some post-storm periods and the next pre-storm periods, I set up a routine to summarize data for each storm individually and then combine all of it together again.
+
+
+__Create the functions__ 
+
+```{r}
+
+# first, pull from the storm_info data frame the storm of interest; start date for subsetting; end date for subsetting; and storm start and end dates.
+# storm_of_interest <- "Cindy"
+
+wq_summaries <- function(storm_of_interest){
+
+    subset_start <- storm_info$baseline_start[storm_info$storm_name == storm_of_interest]
+    subset_end <- storm_info$post_end[storm_info$storm_name == storm_of_interest]
+    soi_start <- storm_info$storm_start[storm_info$storm_name == storm_of_interest]
+    soi_end <- storm_info$storm_end[storm_info$storm_name == storm_of_interest]
+    
+    
+    ### WQ
+    # subset data for this storm; add a column for baseline, post-storm, or during storm
+    soi_dat <- dat_wq %>%
+        filter(datetimestamp >= subset_start,
+               datetimestamp <= subset_end) %>%
+        mutate(storm_name = storm_of_interest)
+    soi_dat$period <- ifelse(soi_dat$datetimestamp < soi_start, "pre",
+                             ifelse(soi_dat$datetimestamp > soi_end, "post",
+                                    "storm"))
+    
+    # use dplyr to group by station and time period, then generate summaries
+    # round means and medians to 2 or 3 digits past the decimal point, depending on parameter
+    summary_wq <- soi_dat %>%
+        group_by(stationcode, period) %>%
+        summarize(depth_min = min(depth, na.rm=TRUE),
+                  depth_mean = round(mean(depth, na.rm=TRUE), 3),
+                  depth_median = round(median(depth, na.rm=TRUE), 3),
+                  depth_max = max(depth, na.rm=TRUE),
+                  level_min = min(level, na.rm=TRUE),
+                  level_mean = round(mean(level, na.rm=TRUE), 3),
+                  level_median = round(median(level, na.rm=TRUE), 3),
+                  level_max = max(level, na.rm=TRUE),
+                  spcond_min = min(spcond, na.rm=TRUE),
+                  spcond_mean = round(mean(spcond, na.rm=TRUE), 2),
+                  spcond_median = round(median(spcond, na.rm=TRUE), 2),
+                  spcond_max = max(spcond, na.rm=TRUE),
+                  sal_min = min(sal, na.rm=TRUE),
+                  sal_mean = round(mean(sal, na.rm=TRUE), 2),
+                  sal_median = round(median(sal, na.rm=TRUE), 2),
+                  sal_max = max(sal, na.rm=TRUE)) %>%
+        mutate(storm_name = storm_of_interest)
+
+}
+
+
+
+met_summaries <- function(storm_of_interest) {
+    
+    subset_start <- storm_info$baseline_start[storm_info$storm_name == storm_of_interest]
+    subset_end <- storm_info$post_end[storm_info$storm_name == storm_of_interest]
+    soi_start <- storm_info$storm_start[storm_info$storm_name == storm_of_interest]
+    soi_end <- storm_info$storm_end[storm_info$storm_name == storm_of_interest]
+    
+    
+    ### MET
+    # subset data for this storm; add a column for baseline, post-storm, or during storm
+    soi_dat <- dat_met %>%
+        filter(datetimestamp >= subset_start,
+               datetimestamp <= subset_end) %>%
+        mutate(storm_name = storm_of_interest)
+    soi_dat$period <- ifelse(soi_dat$datetimestamp < soi_start, "pre",
+                             ifelse(soi_dat$datetimestamp > soi_end, "post",
+                                    "storm"))
+    
+    # use dplyr to group by station and time period, then generate summaries
+    # round means and medians to 2 or 3 digits past the decimal point, depending on parameter
+    summary_met <- soi_dat %>%
+        group_by(stationcode, period) %>%
+        summarize(bp_min = min(bp, na.rm=TRUE),
+                  bp_mean = round(mean(bp, na.rm=TRUE), 2),
+                  bp_median = round(median(bp, na.rm=TRUE), 2),
+                  bp_max = max(bp, na.rm=TRUE),
+                  wspd_min = min(wspd, na.rm=TRUE),
+                  wspd_mean = round(mean(wspd, na.rm=TRUE), 2),
+                  wspd_median = round(median(wspd, na.rm=TRUE), 2),
+                  wspd_max = max(wspd, na.rm=TRUE),
+                  maxwspd_min = min(maxwspd, na.rm=TRUE),
+                  maxwspd_mean = round(mean(maxwspd, na.rm=TRUE), 2),
+                  maxwspd_median = round(median(maxwspd, na.rm=TRUE), 2),
+                  maxwspd_max = max(maxwspd, na.rm=TRUE)) %>%
+        mutate(storm_name = storm_of_interest)
+
+}
+```
+
+
+__Run the functions__
+
+
+#### Cindy
+
+```{r}
+wq_Cindy <- wq_summaries("Cindy")
+met_Cindy <- met_summaries("Cindy")
+kable(wq_Cindy, caption = "Water Quality parameter summaries from Cindy")
+kable(met_Cindy, caption = "Weather parameter summaries from Cindy")
+```
+
+
+#### Emily
+
+```{r}
+wq_Emily <- wq_summaries("Emily")
+met_Emily <- met_summaries("Emily")
+kable(wq_Emily, caption = "Water Quality parameter summaries from Emily")
+kable(met_Emily, caption = "Weather parameter summaries from Emily")
+```
+
+
+#### Harvey
+
+```{r}
+wq_Harvey <- wq_summaries("Harvey")
+met_Harvey <- met_summaries("Harvey")
+kable(wq_Harvey, caption = "Water Quality parameter summaries from Harvey")
+kable(met_Harvey, caption = "Weather parameter summaries from Harvey")
+```
+
+
+#### Irma
+
+```{r}
+wq_Irma <- wq_summaries("Irma")
+met_Irma <- met_summaries("Irma")
+kable(wq_Irma, caption = "Water Quality parameter summaries from Irma")
+kable(met_Irma, caption = "Weather parameter summaries from Irma")
+```
+
+
+#### Nate
+
+```{r}
+wq_Nate <- wq_summaries("Nate")
+met_Nate <- met_summaries("Nate")
+kable(wq_Nate, caption = "Water Quality parameter summaries from Nate")
+kable(met_Nate, caption = "Weather parameter summaries from Nate")
+```
+
+
+
+### Bind the data frames from the storms together
+
+This will leave me with one huge WQ data frame and one huge MET data frame. I'll get these into a long tidy format, then make some summary plots.
+
+I'm also cleaning out NAs, NaNs, Inf, and -Inf using `is.finite(value)`.
+
+
+```{r}
+wq_all_summary <- bind_rows(wq_Cindy, wq_Emily, wq_Harvey, wq_Irma, wq_Nate)
+wq_all_long <- wq_all_summary %>%
+    gather(key = "param", value = "value", -stationcode, -period, -storm_name) %>%
+    separate(col = param, into = c("measure", "summarystat"), sep = "_") %>%
+    filter(is.finite(value))
+
+# put the periods in order: baseline, storm, then post. (default order is alphabetical)
+wq_all_long$period <- factor(wq_all_long$period, c("pre", "storm", "post"))
+
+
+met_all_summary <- bind_rows(met_Cindy, met_Emily, met_Harvey, met_Irma, met_Nate)
+met_all_long <- met_all_summary %>%
+    gather(key = "param", value = "value", -stationcode, -period, -storm_name) %>%
+    separate(col = param, into = c("measure", "summarystat"), sep = "_") %>%
+    filter(is.finite(value))
+
+# put the periods in order: baseline, storm, then post. (default order is alphabetical)
+met_all_long$period <- factor(met_all_long$period, c("pre", "storm", "post"))
+```
+
+
+Here are the top and bottom 10 rows of each data frame (there are almost 2500 rows in this format):
+
+```{r}
+kable(head(wq_all_long, 10))
+kable(tail(wq_all_long, 10))
+kable(head(met_all_long, 10))
+kable(tail(met_all_long, 10))
+```
+
+
+
+Make functions (one for wq and one for met) to plot storm x site on a grid, and run them on the various parameters.
+
+```{r}
+
+wqparam_grid <- function(param_of_interest){
+    
+    subdat <- wq_all_long %>%
+        filter(measure == param_of_interest)
+    
+    ggplot(subdat, aes(x=period, y=value)) +
+        geom_point(aes(col=summarystat), size=3, alpha=0.7) +
+        facet_grid(stationcode ~ storm_name) +
+        theme_bw() +
+        ggtitle(paste0(param_of_interest, " before, during, and after 2017 named storms"))
+}
+
+
+metparam_grid <- function(param_of_interest){
+    
+    subdat <- met_all_long %>%
+        filter(measure == param_of_interest)
+    
+    ggplot(subdat, aes(x=period, y=value)) +
+        geom_point(aes(col=summarystat), size=3, alpha=0.7) +
+        facet_grid(stationcode ~ storm_name) +
+        theme_bw() +
+        ggtitle(paste0(param_of_interest, " before, during, and after 2017 named storms"))
+}
+```
+
+```{r, fig.width=10, fig.height=8}
+wqparam_grid("spcond")
+wqparam_grid("sal")
+wqparam_grid("depth")
+wqparam_grid("level")
+
+metparam_grid("bp")
+metparam_grid("wspd")
+metparam_grid("maxwspd")
+```
+
+```{r, fig.width=10, fig.height=5}
+
+wqparam_grid("level")
+
+```
+
+
+#### Do that again, but with free y-scales
+
+Make functions (one for wq and one for met) to plot storm x site on a grid, and run them on the various parameters.
+
+```{r}
+
+wqparam_grid <- function(param_of_interest){
+    
+    subdat <- wq_all_long %>%
+        filter(measure == param_of_interest)
+    
+    ggplot(subdat, aes(x=period, y=value)) +
+        geom_point(aes(col=summarystat), size=3, alpha=0.7) +
+        facet_grid(stationcode ~ storm_name, scales = "free") +
+        theme_bw() +
+        ggtitle(paste0(param_of_interest, " before, during, and after 2017 named storms"))
+}
+
+
+metparam_grid <- function(param_of_interest){
+    
+    subdat <- met_all_long %>%
+        filter(measure == param_of_interest)
+    
+    ggplot(subdat, aes(x=period, y=value)) +
+        geom_point(aes(col=summarystat), size=3, alpha=0.7) +
+        facet_grid(stationcode ~ storm_name, scales="free") +
+        theme_bw() +
+        ggtitle(paste0(param_of_interest, " before, during, and after 2017 named storms"))
+}
+```
+
+```{r, fig.width=10, fig.height=8}
+wqparam_grid("spcond")
+wqparam_grid("sal")
+wqparam_grid("depth")
+wqparam_grid("level")
+
+metparam_grid("bp")
+metparam_grid("wspd")
+metparam_grid("maxwspd")
+```
+
+```{r, fig.width=10, fig.height=5}
+
+wqparam_grid("level")
+
+```
+
+
+
+
+### Would be nice to have a ribbon plot
+
+So I need to reshape the data again:
+
+```{r}
+wq_all_wide <- wq_all_long %>%
+    spread(key = summarystat, value = value)
+
+met_all_wide <- met_all_long %>%
+    spread(key = summarystat, value = value)
+```
+
+And graph:
+
+```{r, fig.width=10, fig.height=8}
+subdat <- met_all_wide %>%
+        filter(measure == "maxwspd")
+    
+    ggplot(subdat, aes(x=as.numeric(period))) +
+        geom_ribbon(aes(ymin=min, ymax=max), fill="lightsteelblue3", alpha=0.4) +
+        geom_point(aes(y=mean), size=3, alpha=0.7, col="red3") +
+        geom_line(aes(y=mean), alpha=0.7, lty=2, lwd=1, col="red3") +
+        facet_grid(stationcode ~ storm_name, scales="free") +
+        scale_x_continuous(breaks=c(1:3), labels = levels(subdat$period)) +
+        theme_bw() +
+        theme(panel.spacing = unit(0.8, "lines")) +
+        ggtitle("max wind speed before, during, and after 2017 named storms")
+```
+
+
+### Free y-scales showing data range for each storm period; each param; red is mean
+
+
+```{r}
+wqribbon_grid <- function(param_of_interest){
+    
+    subdat <- wq_all_wide %>%
+        filter(measure == param_of_interest)
+    
+    ggplot(subdat, aes(x=as.numeric(period))) +
+        geom_ribbon(aes(ymin=min, ymax=max), fill="lightsteelblue3", alpha=0.4) +
+        geom_point(aes(y=mean), size=3, alpha=0.7, col="red3") +
+        geom_line(aes(y=mean), alpha=0.7, lty=2, lwd=1, col="red3") +
+        facet_grid(stationcode ~ storm_name, scales="free") +
+        scale_x_continuous(breaks=c(1:3), labels = levels(subdat$period)) +
+        theme_bw() +
+        theme(panel.spacing = unit(0.8, "lines")) +
+        ggtitle(paste0(param_of_interest, " before, during, and after 2017 named storms")) +
+        xlab("time period") +
+        ylab("values")
+}
+
+
+metparam_grid <- function(param_of_interest){
+    
+    subdat <- met_all_wide %>%
+        filter(measure == param_of_interest)
+    
+    ggplot(subdat, aes(x=as.numeric(period))) +
+        geom_ribbon(aes(ymin=min, ymax=max), fill="lightsteelblue3", alpha=0.4) +
+        geom_point(aes(y=mean), size=3, alpha=0.7, col="red3") +
+        geom_line(aes(y=mean), alpha=0.7, lty=2, lwd=1, col="red3") +
+        facet_grid(stationcode ~ storm_name, scales="free") +
+        scale_x_continuous(breaks=c(1:3), labels = levels(subdat$period)) +
+        theme_bw() +
+        theme(panel.spacing = unit(0.8, "lines")) +
+        ggtitle(paste0(param_of_interest, " before, during, and after 2017 named storms")) +
+        xlab("time period") +
+        ylab("values")
+}
+```
+
+
+```{r, fig.width=10, fig.height=12}
+wqribbon_grid("spcond")
+wqribbon_grid("sal")
+wqribbon_grid("depth")
+
+metparam_grid("bp")
+metparam_grid("wspd")
+metparam_grid("maxwspd")
+```
+
+```{r, fig.width=10, fig.height=6}
+
+wqribbon_grid("level")
+
+```
+
+
+### Ready the data for another script
+
+I've decided to focus in on TS Cindy in the northern Gulf. We have plenty of conductivity/salinity data from those stations; one of them was discovered through IOOS; and the northern gulf stations were all impacted by her.  
+
+Because of the quantity of data that I ran through the process in this document, it's pretty slow, so I'm going to generate a subset of data from these few stations to use in the deeper dive.
+
+I've named the following NGOM stations and pulled all data until 9/1 from each:  
+
+* apadbwq  
+* apapcwq  
+* apaebmet  
+* gndbcwq  
+* gndblwq
+* gndcrmet  
+* la_nos (this has both wq and met)  
+* wkbfrwq  
+* wkbwbwq  
+* wkbshmet
+
+
+
+This has resulted in two data frames, one for wq and one for met, with all of the readings. I've saved those AND the table "storm info" into an .RData file called `dat_cindy_ngom`, which can be loaded into the next script. 
+
+```{r}
+ngom_stns <- c("apadbwq", "apapcwq", "apaebmet", "gndbcwq", "gndblwq", "gndcrmet", "la_nos", "wkbfrwq", "wkbwbwq", "wkbshmet")
+
+wq_cindy_ngom <- dat_wq %>%
+    filter(stationcode %in% ngom_stns,
+           datetimestamp < "2017-09-01 0:00")
+
+met_cindy_ngom <- dat_met %>%
+    filter(stationcode %in% ngom_stns,
+           datetimestamp < "2017-09-01 0:00")
+
+save(wq_cindy_ngom, met_cindy_ngom, storm_info, file="dat_cindy_ngom.R")
+    
+```
+
+
+### Ready Irma data for another script
+
+I think Irma had the widest impacts, so I'm going to check out her data. I will exclude Texas stations because of impacts from Harvey. We have plenty of conductivity/salinity data from those stations; one of them was discovered through IOOS; and the eastern and northern gulf stations were all impacted by her.  
+
+Because of the quantity of data that I ran through the process in this document, it's pretty slow, so I'm going to generate a subset of data from these few stations to use in the deeper dive.
+
+Irma was a named storm from 8/30-9/12.
+
+I've named the following stations and pulled all data from from each from 8/1 to 10/12 (if available):  
+
+* apadbwq  
+* apapcwq  
+* apaebmet  
+* gndbcwq  
+* gndblwq
+* gndcrmet  
+* la_nos (this has both wq and met)  
+* wkbfrwq  
+* wkbwbwq  
+* wkbshmet
+* rkbfuwq  
+* rkbmbwq  
+* rkbuhmet
+
+
+
+This has resulted in two data frames, one for wq and one for met, with all of the readings. I've saved those AND the table "storm info" into an .RData file called `dat_irma`, which can be loaded into the next script. 
+
+```{r}
+stns <- c("apadbwq", "apapcwq", "apaebmet", "gndbcwq", "gndblwq", "gndcrmet", "la_nos", "wkbfrwq", "wkbwbwq", "wkbshmet", "rkbfuwq", "rkbmbwq", "rkbuhmet")
+
+wq_irma <- dat_wq %>%
+    filter(stationcode %in% stns,
+           datetimestamp >= "2017-08-01 0:00",
+           datetimestamp < "2017-10-13 0:00")
+
+met_irma <- dat_met %>%
+    filter(stationcode %in% stns,
+           datetimestamp >= "2017-08-01 0:00",
+           datetimestamp < "2017-10-13 0:00")
+
+save(wq_irma, met_irma, storm_info, file="dat_irma.R")
+    
+```
+

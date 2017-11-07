@@ -1,0 +1,350 @@
+---
+title: "CERF data workup - Hurricane Irma"
+author: "Kim Cressman"
+date: "`r Sys.Date()`"
+output: 
+    html_document:
+        code_folding: 'hide'
+        fig_width: 10
+        fig_height: 11
+---
+
+## Background
+
+
+This project started out with the objective of combining NERRS and IOOS data to analyze inshore-to-offshore gradients of storm effects.  
+
+I was not able to find IOOS stations offshore near Gulf Coast NERRS (though there are some good regional monitoring programs already looking at inshore-to-offshore gradients - SCCF's RECON network in the Caloosahatchee River and Estuary; Mobile Bay NEP/DISL's network). But spatial and temporal differences can be pulled out of multiple stations in a different way, and be applied to similar data integration projects in the future - hopefully with less effort than this initial workup.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+```
+
+Load packages
+
+```{r}
+library(tidyverse)
+library(reshape2)
+library(lubridate)
+library(htmlTable)
+library(shape)
+library(RColorBrewer)
+library(knitr)
+```
+
+
+## Analysis of storm effects, using NERRS and IOOS data  
+
+There are several steps involved in analyzing storm effects. I'll step through them in detail in this file; here is the summary.  
+
+1.  __Decide on a storm to analyze.__  After exploratory data analysis of all named storms in the Gulf of Mexico in 2017, I decided to focus on Tropical Storm Cindy. Then I changed my mind and decided to look at Irma, because the effects were more widespread.    
+    +  How do you define the storm period? I used the time it was a named storm, but clearly there were alread some depth effects before that.  
+    +  Irma was a named storm much longer than Cindy was, and moved more slowly; timing could be different along the north-south gradient.  
+    +  Maybe a change-point analysis could help?
+2.  __Define your area of interest.__  Originally, my area of interest was the entire Gulf of Mexico; for Cindy, this was narrowed down to the Northern Gulf, from Louisiana to the panhandle of Florida. For Irma, I excluded the TX stations but included all others.
+3.  __Obtain data for the analysis.__  I went out of order here and downloaded data before deciding on my storm. I used data from the Gulf Coast NERRS and the GCOOS data portal.  
+4.  __Select your parameter of interest.__  
+    +  Sometimes this is based on what's available. I'm most interested in salinity because of the management implications. However, the IOOS-discovered station I'm using for Louisiana only reports conductivity, so I'll use that as a proxy.  
+    +  This has evolved into looking at depth, because of weird (cool! but weird) conductivity stuff happening during Cindy, and those effects not being as large as I'd originally thought. Irma did some crazy things to depth, so I'm going to look at depth with her as well.
+    
+5.  __Define "impacts"__.  I define this here as difference from baseline conditions.  
+    +  Difference from what part of baseline conditions? This is an important consideration. My stations started showing effects before the storm had a name, so I don't want that data to skew an average; so I'm using the median of the readings from the baseline period.  
+6.  __Define "baseline conditions".__  This is somewhat arbitrary, but because Cindy was only the first of many storms in the Gulf this summer, I chose a month before the storm as the baseline. For later storms in the summer, 2 weeks might be better.  
+7.  __Determine timing and duration of impacts.__
+    +  date of maximum deviation from baseline  
+    +  how many days below a threshold value (this is especially important if you're thinking about oyster fisheries and salinity tolerance)  
+    
+8.  __Determine magnitude of impacts.__  
+    +  I'll calculate the difference between post-baseline max and baseline median; post-baseline min and baseline median; and then figure out which of those has a larger absolute value.
+9.  __Synthesize this information.__  Maps showing timing and duration of maximum impact could be useful to see this at a regional scale.
+
+
+### Data Download  
+
+__NERRS data__: I used the "Custom Query" option from the CDMO's Advanced Query System (http://cdmo.baruch.sc.edu/aqs/) to download WQ and MET data from all stations at all 5 Gulf of Mexico Reserves, from 5/1/2017 - 10/30/2017. This was delivered in one CSV file, which I named "nerrs.csv".
+
+__IOOS data__: I used the GCOOS data portal to find stations that had water level and/or salinity data in gaps between NERRS. I ended up downloading data from two NOAA Tides and Currents stations; one in Texas, near Houston (NOS 8770613), and one in Louisiana (NOS 8764314). It was surprisingly difficult to find the data; there was no direct link that I could find from the GCOOS portal. I did get enough information to google the stations and find them. Data through Tides and Currents can only be downloaded a month at a time, and there are three separate data types to deal with, so I figured out the url pattern for each type (MET, water level, and temp/conductivity), copied and pasted, changed the dates, changed the stations, and downloaded everything in one run of the script `Data downloads`. I then used the script `Data concatination` to glue all of those NOS files together, and exported a CSV that I named "NOS_all.csv".
+
+### Data processing  
+
+Data files from all stations were combined, and many exploratory graphs were generated, in `CERF workup.Rmd`. I eventually decided to take a deep dive into data from Tropical Storm Cindy in the northern Gulf, because I have NERR and IOOS-discovered stations that showed conductivity effects from the storm.
+
+For Cindy, I subsetted the wq and met files to include only the following stations; all data through 9/1/17 are included.
+
+* apadbwq  
+* apapcwq  
+* apaebmet  
+* gndbcwq  
+* gndblwq
+* gndcrmet  
+* la_nos (this has both wq and met)  
+* wkbfrwq  
+* wkbwbwq  
+* wkbshmet
+
+
+For Irma, I used the following:
+I've named the following stations and pulled all data from from each from 8/1 to 10/12 (if available):  
+
+* apadbwq  
+* apapcwq  
+* apaebmet  
+* gndbcwq  
+* gndblwq
+* gndcrmet  
+* la_nos (this has both wq and met)  
+* wkbfrwq  
+* wkbwbwq  
+* wkbshmet
+* rkbfuwq  
+* rkbmbwq  
+* rkbuhmet
+
+
+### Load and prep data
+
+Three data frames were saved together and will be opened here:  
+
+* wq_irma
+* met_irma
+* storm_info
+
+```{r}
+load("dat_irma.R")
+kable(storm_info)
+```
+
+
+#### Label pre-storm period, storm period, and post-storm period.  
+
+Irma was a named storm from 8/30/2017 to 9/12/2017. Turn these labels into an ordered factor (pre -- storm -- post).  
+
+
+Also turn stationcode into a factor so stations will be arranged from west to east.
+
+```{r}
+wq_irma$period <- ifelse(wq_irma$datetimestamp < "2017-08-30", "pre",
+                             ifelse(wq_irma$datetimestamp > "2017-09-12", "post",
+                                    "storm"))
+wq_irma$period <- factor(wq_irma$period, c("pre", "storm", "post"))
+wq_irma$stationcode <- factor(wq_irma$stationcode, c("la_nos", "gndblwq", "gndbcwq", "wkbwbwq", "wkbfrwq", "apapcwq", "apadbwq", "rkbmbwq", "rkbfuwq"))
+
+
+met_irma$period <- ifelse(met_irma$datetimestamp < "2017-08-30", "pre",
+                             ifelse(met_irma$datetimestamp > "2017-09-12", "post",
+                                    "storm"))
+met_irma$period <- factor(met_irma$period, c("pre", "storm", "post"))
+met_irma$stationcode <- factor(met_irma$stationcode, c("la_nos", "gndcrmet", "wkbshmet", "apaebmet", "rkbuhmet"))
+
+```
+
+
+#### Trim and peek at the data  
+
+Data's already trimmed to a month on either side of the storm from the previous file. Here, I'm just copying water level data from the Louisiana NOS station into the depth column, to match NERR data.
+
+```{r}
+
+wq <- wq_irma %>%
+    mutate(depth = ifelse(!is.na(depth), depth, level))
+met <- met_irma 
+
+
+
+kable(head(wq))
+kable(head(met))
+```
+
+
+### Pull out baseline info on conductivity
+
+```{r}
+wq_pre <- wq %>%
+    filter(period == "pre") %>%
+    mutate(month = month(datetimestamp),
+           day = day(datetimestamp),
+           year = year(datetimestamp),
+           yymmdd = ymd_hm(paste0(year, "-", month, "-", day, " 12:00"))) %>%
+    select(stationcode, yymmdd, spcond) %>%
+    group_by(stationcode, yymmdd) %>%
+    summarize(daily_min = min(spcond, na.rm=TRUE),
+              daily_mean = mean(spcond, na.rm=TRUE),
+              daily_max = max(spcond, na.rm=TRUE))
+
+wq_storm <- wq %>%
+    filter(period == "storm") %>%
+    mutate(month = month(datetimestamp),
+           day = day(datetimestamp),
+           year = year(datetimestamp),
+           yymmdd = ymd_hm(paste0(year, "-", month, "-", day, " 12:00"))) %>%
+    select(stationcode, yymmdd, spcond) %>%
+    group_by(stationcode, yymmdd) %>%
+    summarize(daily_min = min(spcond, na.rm=TRUE),
+              daily_mean = mean(spcond, na.rm=TRUE),
+              daily_max = max(spcond, na.rm=TRUE))
+
+wq_post <- wq %>%
+    filter(period == "post") %>%
+    mutate(month = month(datetimestamp),
+           day = day(datetimestamp),
+           year = year(datetimestamp),
+           yymmdd = ymd_hm(paste0(year, "-", month, "-", day, " 12:00"))) %>%
+    select(stationcode, yymmdd, spcond) %>%
+    group_by(stationcode, yymmdd) %>%
+    summarize(daily_min = min(spcond, na.rm=TRUE),
+              daily_mean = mean(spcond, na.rm=TRUE),
+              daily_max = max(spcond, na.rm=TRUE))
+```
+
+
+#### Plot it
+
+Facets are stacked from west at the top to east at the bottom.
+
+Thin, colored lines are 15-minute (NERRS) or hourly (NOS) data.
+
+Thick lines are daily averages. Red is the time period that the named storm existed (8/30-9/12). Black is one month on either side.  
+
+The thin vertical line is the date of landfall (9/10).
+
+```{r}
+
+landfall <- as.numeric(as.POSIXct("2017-09-10 12:00"))
+
+ggplot() +
+    geom_line(data=wq, aes(x=datetimestamp, y=spcond, col=stationcode)) +
+    geom_line(data=wq_pre, aes(x=yymmdd, y=daily_mean), col="black", lwd=1) +
+    geom_line(data=wq_storm, aes(x=yymmdd, y=daily_mean), col="red3", lwd=1) +
+    geom_line(data=wq_post, aes(x=yymmdd, y=daily_mean), col="black", lwd=1) +
+    geom_vline(data=wq, aes(xintercept = landfall), lty=4, col="black") +
+    facet_wrap( ~stationcode, ncol=1, scales="free_y") +
+    theme_bw() +
+    ggtitle("conductivity")
+
+
+```
+ 
+
+### Do all this with depth because it might show more info
+
+
+```{r}
+wq_pre <- wq %>%
+    filter(period == "pre") %>%
+    mutate(month = month(datetimestamp),
+           day = day(datetimestamp),
+           year = year(datetimestamp),
+           yymmdd = ymd_hm(paste0(year, "-", month, "-", day, " 12:00"))) %>%
+    select(stationcode, yymmdd, depth) %>%
+    group_by(stationcode, yymmdd) %>%
+    summarize(daily_min = min(depth, na.rm=TRUE),
+              daily_mean = mean(depth, na.rm=TRUE),
+              daily_max = max(depth, na.rm=TRUE))
+
+wq_storm <- wq %>%
+    filter(period == "storm") %>%
+    mutate(month = month(datetimestamp),
+           day = day(datetimestamp),
+           year = year(datetimestamp),
+           yymmdd = ymd_hm(paste0(year, "-", month, "-", day, " 12:00"))) %>%
+    select(stationcode, yymmdd, depth) %>%
+    group_by(stationcode, yymmdd) %>%
+    summarize(daily_min = min(depth, na.rm=TRUE),
+              daily_mean = mean(depth, na.rm=TRUE),
+              daily_max = max(depth, na.rm=TRUE))
+
+wq_post <- wq %>%
+    filter(period == "post") %>%
+    mutate(month = month(datetimestamp),
+           day = day(datetimestamp),
+           year = year(datetimestamp),
+           yymmdd = ymd_hm(paste0(year, "-", month, "-", day, " 12:00"))) %>%
+    select(stationcode, yymmdd, depth) %>%
+    group_by(stationcode, yymmdd) %>%
+    summarize(daily_min = min(depth, na.rm=TRUE),
+              daily_mean = mean(depth, na.rm=TRUE),
+              daily_max = max(depth, na.rm=TRUE))
+```
+
+
+#### Plot it
+
+```{r}
+ggplot() +
+    geom_line(data=wq, aes(x=datetimestamp, y=depth, col=factor(stationcode))) +
+    geom_line(data=wq_pre, aes(x=yymmdd, y=daily_mean), col="black", lwd=1) +
+    geom_line(data=wq_storm, aes(x=yymmdd, y=daily_mean), col="red3", lwd=1) +
+    geom_line(data=wq_post, aes(x=yymmdd, y=daily_mean), col="black", lwd=1) +
+    geom_vline(data=wq, aes(xintercept = landfall), lty=4, col="black") +
+    facet_wrap( ~stationcode, ncol=1, scales="free_y") +
+    theme_bw() +
+    ggtitle("depth/level")
+
+
+```
+
+
+### Find a value from the baseline period for comparison
+
+Because there are sometimes other disturbances in what we would consider the baseline, I've chosen to use the median value from 15-minute data as the comparison point.
+
+```{r}
+wq_baselines <- wq %>%
+    group_by(stationcode, period) %>%
+    summarize(depth_median = round(median(depth, na.rm=TRUE), 3),
+              depth_mean = round(mean(depth, na.rm=TRUE), 3),
+              depth_min = min(depth, na.rm=TRUE),
+              depth_max = max(depth, na.rm=TRUE))
+
+kable(wq_baselines, caption = "summary statistics for each site by pre/during/post storm period")
+```
+
+
+Mean and median really aren't all that different, especially compared to those ranges. Interesting. But I have to pick something, so I choose median.
+
+
+#### You know, I could make a box plot out of that.
+
+Or a violin plot!!!
+
+
+```{r, fig.width=9, fig.height=4}
+ggplot(wq) +
+    geom_violin(aes(x=stationcode, y=depth, fill=period)) +
+    theme_bw() +
+    xlab("station")
+
+ggplot(wq) +
+    geom_boxplot(aes(x=stationcode, y=depth, fill=period)) +
+    theme_bw() +
+    xlab("station")
+```
+
+
+### Pick out most extreme values from storm and post-storm periods
+
+Trim the data so it ends before Nate (cut it off at 10/01, a week before). Remove "pre" data.
+
+
+```{r}
+
+depth_max <- wq %>%
+    filter(datetimestamp < "2017-10-02",
+           period != "pre") %>%
+    group_by(stationcode) %>%
+    filter(datetimestamp == datetimestamp[which.max(depth)]) %>%
+    select(stationcode, datetimestamp, depth, period)
+kable(depth_max, caption = "maximum depths and time")
+
+
+depth_min <- wq %>%
+    filter(datetimestamp < "2017-10-02",
+           period != "pre") %>%
+    group_by(stationcode) %>%
+    filter(datetimestamp == datetimestamp[which.min(depth)]) %>%
+    select(stationcode, datetimestamp, depth, period)
+kable(depth_min, caption = "minimum depths and time")
+```
+
